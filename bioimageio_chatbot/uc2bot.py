@@ -5,7 +5,6 @@ import datetime
 import secrets
 import aiofiles
 from imjoy_rpc.hypha import login, connect_to_server
-
 from pydantic import BaseModel, Field
 from schema_agents.role import Role
 from schema_agents.schema import Message
@@ -13,6 +12,46 @@ from typing import Dict, List, Optional
 import sys
 import io
 import pkg_resources
+from typing import Any, Dict, List, Optional, Union
+from io import BytesIO
+import imageio
+import base64
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+import time
+
+def resize_image(image, new_size):
+    # Using Pillow to resize the image
+    pil_image = Image.fromarray((image * 255).astype('uint8'))  # Assuming image is in the range [0, 1]
+    pil_image = pil_image.resize(new_size)
+    resized_image = np.array(pil_image) / 255.0  # Convert back to [0, 1] range
+    return resized_image
+
+
+
+def image_to_markdown(image, new_size=(100, 100)):
+    # Resize the image
+    resized_image = resize_image(image, new_size)
+
+    # Plot the resized image using matplotlib
+    plt.imshow(resized_image)
+    plt.axis('off')
+
+    # Save the image to a BytesIO object
+    buffer = BytesIO()
+    plt.savefig(buffer, format='png', bbox_inches='tight', pad_inches=0)
+    plt.close()
+
+    # Encode the resized image to base64
+    image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+    # Create the Markdown string with the encoded image
+    markdown_string = f"![Image](data:image/png;base64,{image_base64})"
+
+    return markdown_string
+
+
 
 
 def execute_code(script, context=None):
@@ -70,18 +109,75 @@ class QuestionWithHistory(BaseModel):
     chat_history: Optional[List[Dict[str, str]]] = Field(None, description="The chat history.")
     user_profile: Optional[UserProfile] = Field(None, description="The user's profile. You should use this to personalize the response based on the user's background and occupation.")
 
-def create_customer_service():
+class MoveStageAction(BaseModel):
+    """Move the stage on the microscope, set distances of movement."""
+    x: int = Field(description="Move the stage along X direction (um).")
+    y: int = Field(description="Move the stage along Y direction (um).")
+    z: int = Field(description="Move the stage along Z direction (um).")
+
+class SnapImageAction(BaseModel):
+    """Snap an image from microscope"""
+    path: str = Field(description="File path to save the image. Format should be .tiff")
+
+class ActionPlan(BaseModel):
+    """Creat a list of actions according to the user's request."""
+    actions: List[Union[MoveStageAction,SnapImageAction]] = Field(description="A list of actions")
+
+async def create_customer_service(): ###Async version####################
+    #Initialize UC2 microscopy access
+    uc2_server = await connect_to_server({"server_url": "https://ai.imjoy.io/"})
+
+    uc2_svc = await uc2_server.get_service("microscope-control")
+
+    def clean_image_in_history(chat_history):
+        for chat in chat_history:
+            string=chat['content']
+            index = string.find("![Image]")
+        # If the image markdown string is found, update the string
+            if index != -1:
+                string = string[:index + len("![Image]")]
+            chat['content']=string
+
     async def respond_to_user(question_with_history: QuestionWithHistory = None, role: Role = None) -> str:
         """Answer the user's question directly or retrieve relevant documents from the documentation, or create a Python Script to get information about details of models."""
+        #Clean the images in chat history.
+        clean_image_in_history(question_with_history.chat_history)
         inputs = [question_with_history.user_profile] + list(question_with_history.chat_history) + [question_with_history.question]
         # The channel info will be inserted at the beginning of the inputs
-        req = await role.aask(inputs, FinalResponse)
-        return req
+        req = await role.aask(inputs, Union[FinalResponse,ActionPlan])
+        if isinstance(req,ActionPlan):
+            return_string=''
+            for action in req.actions:
+
+                if isinstance(action, MoveStageAction):
+                    # asyncio.gather(uc2_svc.move(value=req.x, axis="X", is_absolute=False, is_blocking=False),
+                    #                uc2_svc.move(value=req.y, axis="Y", is_absolute=False, is_blocking=False),
+                    #                await uc2_svc.move(value=req.z, axis="Z", is_absolute=False, is_blocking=False)
+                    # )
+
+                    if action.x != 0.0:                  
+                        await uc2_svc.move(value=action.x, axis="X", is_absolute=False, is_blocking=False)
+                        time.sleep(1)
+                    if action.y != 0.0:
+                        await uc2_svc.move(value=action.y, axis="Y", is_absolute=False, is_blocking=False)
+                        time.sleep(1)
+                    if action.z != 0.0: 
+                        await uc2_svc.move(value=action.z, axis="Z", is_absolute=False, is_blocking=False)
+                        time.sleep(3)
+                    return_string += f"The stage has moved, distance: ({action.x}, {action.y}, {action.z}) through X, Y and Z axis.\n"
+                elif isinstance(action,SnapImageAction):
+                    uc2_image = await uc2_svc.getImage(path=action.path)
+                    markdown_image=image_to_markdown(uc2_image)
+                    return_string += f"The image has been saved to {action.path} and here is the image:\n {markdown_image}\n"
+
+            return return_string
+        # else:
+        #     raise RuntimeError("Unsupported action.")
         
     customer_service = Role(
-        name="Melman",
-        profile="Customer Service",
-        goal="Your goal as Melman from Madagascar, the community knowledge base manager, is to assist users in effectively utilizing the knowledge base for bioimage analysis. You are responsible for answering user questions, providing clarifications, retrieving relevant documents, and executing scripts as needed. Your overarching objective is to make the user experience both educational and enjoyable.",
+        name="MicroscopeOperator",
+        profile="Microscope Controller",
+        goal="Your goal is control the microscope based on the user's request.",
         constraints=None,
         actions=[respond_to_user],
     )
@@ -116,7 +212,7 @@ async def register_chat_service(server):
         print(f"The chat session folder is not found at {chat_logs_path}, will create one now.")
         os.makedirs(chat_logs_path, exist_ok=True)
     
-    customer_service = create_customer_service()
+    customer_service = await create_customer_service()
     
     event_bus = customer_service.get_event_bus()
     event_bus.register_default_events()
@@ -240,6 +336,12 @@ async def register_chat_service(server):
     server_url = server.config['public_base_url']
 
     print(f"The BioImage.IO Chatbot is available at: {server_url}/{server.config['workspace']}/apps/bioimageio-chatbot-client/index")
+
+### This is about registering hypha
+
+
+
+
 
 if __name__ == "__main__":
     # asyncio.run(main())
