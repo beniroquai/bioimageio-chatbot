@@ -1,5 +1,6 @@
-import asyncio
 import os
+os.environ["OPENAI_API_KEY"] = "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"
+import asyncio
 import json
 import datetime
 import secrets
@@ -21,6 +22,9 @@ import numpy as np
 from PIL import Image
 import time
 
+# set openapi key using export 
+
+# export OPENAI_API_KEY=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
 def resize_image(image, new_size):
     # Using Pillow to resize the image
     pil_image = Image.fromarray((image * 255).astype('uint8'))  # Assuming image is in the range [0, 1]
@@ -115,18 +119,24 @@ class MoveStageAction(BaseModel):
     y: int = Field(description="Move the stage along Y direction (um).")
     z: int = Field(description="Move the stage along Z direction (um).")
 
+class SnapImageAndProcessAction(BaseModel):
+    """Snap an image and perform a processing task on the image on the ImSwitch server side."""
+    imageProcessingFunction : str = Field(description="The function to process the image. The function should be a Python script that takes an image as input and returns an image as output.")
+    path: str = Field(description="File path to save the image. Format should be .tiff")
+    
 class SnapImageAction(BaseModel):
     """Snap an image from microscope"""
     path: str = Field(description="File path to save the image. Format should be .tiff")
 
 class ActionPlan(BaseModel):
     """Creat a list of actions according to the user's request."""
-    actions: List[Union[MoveStageAction,SnapImageAction]] = Field(description="A list of actions")
+    actions: List[Union[MoveStageAction,SnapImageAction,SnapImageAndProcessAction]] = Field(description="A list of actions")
 
 async def create_customer_service(): ###Async version####################
     #Initialize UC2 microscopy access
     uc2_server = await connect_to_server({"server_url": "https://ai.imjoy.io/"})
-
+    list_servers = await uc2_server.list_services("public")
+    print(list_servers)
     uc2_svc = await uc2_server.get_service("microscope-control")
 
     def clean_image_in_history(chat_history):
@@ -163,6 +173,10 @@ async def create_customer_service(): ###Async version####################
                     return_string += f"The stage has moved, distance: ({action.x}, {action.y}, {action.z}) through X, Y and Z axis.\n"
                 elif isinstance(action,SnapImageAction):
                     uc2_image = await uc2_svc.getImage(path=action.path)
+                    markdown_image=image_to_markdown(uc2_image)
+                    return_string += f"The image has been saved to {action.path} and here is the image:\n {markdown_image}\n"
+                elif isinstance(action,SnapImageAndProcessAction):
+                    uc2_image = await uc2_svc.getProcessedImages(path=action.path, pythonFunctionString=action.imageProcessingFunction)
                     markdown_image=image_to_markdown(uc2_image)
                     return_string += f"The image has been saved to {action.path} and here is the image:\n {markdown_image}\n"
 
@@ -307,7 +321,8 @@ async def register_chat_service(server):
     
     version = pkg_resources.get_distribution('bioimageio-chatbot').version
     
-    with open(os.path.join(os.path.dirname(__file__), "static/index.html"), "r") as f:
+    mPath = '/Users/bene/Dropbox/Dokumente/Promotion/PROJECTS/MicronController/PYTHON/bioimageio-chatbot/bioimageio_chatbot/static/index.html'
+    with open(mPath, "r") as f:
         index_html = f.read()
     index_html = index_html.replace("https://ai.imjoy.io", server.config['public_base_url'] or f"http://127.0.0.1:{server.config['port']}")
     index_html = index_html.replace('"bioimageio-chatbot"', f'"{hypha_service_info["id"]}"')
