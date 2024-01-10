@@ -1,5 +1,8 @@
 import os
-os.environ["OPENAI_API_KEY"] = "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"
+# read secret.txt and set the OPENAI_API_KEY
+with open('secret.txt', 'r') as f:
+    secretKey = f.read()
+os.environ["OPENAI_API_KEY"] = secretKey
 import asyncio
 import json
 import datetime
@@ -119,8 +122,8 @@ class MoveStageAction(BaseModel):
     y: int = Field(description="Move the stage along Y direction (um).")
     z: int = Field(description="Move the stage along Z direction (um).")
 
-class SnapImageAndProcessAction(BaseModel):
-    """Snap an image and perform a processing task on the image on the ImSwitch server side."""
+class TakeImageAndProcessResult(BaseModel):
+    """Take an image from the microscope and process it using an internal function on the microscope server. The function has to be provided as a string in Python syntax where it has a numpy array as an input and an output."""
     imageProcessingFunction : str = Field(description="The function to process the image. The function should be a Python script that takes an image as input and returns an image as output.")
     path: str = Field(description="File path to save the image. Format should be .tiff")
     
@@ -130,7 +133,7 @@ class SnapImageAction(BaseModel):
 
 class ActionPlan(BaseModel):
     """Creat a list of actions according to the user's request."""
-    actions: List[Union[MoveStageAction,SnapImageAction,SnapImageAndProcessAction]] = Field(description="A list of actions")
+    actions: List[Union[MoveStageAction,SnapImageAction,TakeImageAndProcessResult]] = Field(description="A list of actions")
 
 async def create_customer_service(): ###Async version####################
     #Initialize UC2 microscopy access
@@ -175,7 +178,7 @@ async def create_customer_service(): ###Async version####################
                     uc2_image = await uc2_svc.getImage(path=action.path)
                     markdown_image=image_to_markdown(uc2_image)
                     return_string += f"The image has been saved to {action.path} and here is the image:\n {markdown_image}\n"
-                elif isinstance(action,SnapImageAndProcessAction):
+                elif isinstance(action,TakeImageAndProcessResult):
                     uc2_image = await uc2_svc.getProcessedImages(path=action.path, pythonFunctionString=action.imageProcessingFunction)
                     markdown_image=image_to_markdown(uc2_image)
                     return_string += f"The image has been saved to {action.path} and here is the image:\n {markdown_image}\n"
